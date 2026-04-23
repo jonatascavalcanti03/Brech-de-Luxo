@@ -1,0 +1,286 @@
+// prisma/schema.prisma
+// Brecho de Luxo - E-commerce SaaS
+// Banco: MySQL via Aiven | ORM: Prisma
+
+generator client {
+  provider   = "prisma-client-js"
+  engineType = "library"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────
+// STORE – Configurações da loja (multi-tenant)
+// ─────────────────────────────────────────────
+model Store {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  domain      String?  @unique
+  logo        String?
+  banner      String?
+  description String?  @db.Text
+  whatsapp    String?
+  instagram   String?
+  email       String?
+  primaryColor String  @default("#10b981")  // Emerald
+  accentColor  String  @default("#d4af37")  // Rose Gold
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  products  Product[]
+  users     User[]
+  orders    Order[]
+
+  @@index([slug])
+  @@map("stores")
+}
+
+// ─────────────────────────────────────────────
+// USER – Admin e clientes com RBAC
+// ─────────────────────────────────────────────
+enum Role {
+  SUPER_ADMIN
+  STORE_ADMIN
+  CUSTOMER
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  password      String?
+  role          Role      @default(CUSTOMER)
+  storeId       String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  store     Store?    @relation(fields: [storeId], references: [id])
+  accounts  Account[]
+  sessions  Session[]
+  orders    Order[]
+  wishlist  Wishlist[]
+  accessLogs AccessLog[]
+
+  @@index([email])
+  @@index([storeId])
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────
+// AUTH – NextAuth.js v5 (Auth.js) models
+// ─────────────────────────────────────────────
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@id([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ─────────────────────────────────────────────
+// PRODUCT – Peça Única (inventário atômico)
+// ─────────────────────────────────────────────
+enum ProductStatus {
+  AVAILABLE
+  RESERVED
+  SOLD
+}
+
+enum Condition {
+  NOVO_COM_ETIQUETA    // 10/10
+  SEMINOVO             // 9/10
+  OTIMO_ESTADO         // 8/10
+  BOM_ESTADO           // 7/10
+  VINTAGE              // Peça vintage autenticada
+}
+
+model Product {
+  id           String        @id @default(cuid())
+  storeId      String
+  title        String
+  slug         String        @unique
+  description  String?       @db.Text
+  brand        String?
+  category     String
+  size         String?
+  color        String?
+  material     String?
+  condition    Condition     @default(SEMINOVO)
+  price        Decimal       @db.Decimal(10, 2)
+  originalPrice Decimal?     @db.Decimal(10, 2) // Preço original (riscado)
+  
+  // Cloudinary – array JSON de URLs { url, publicId, type: 'image'|'video' }
+  mediaUrls    Json          @default("[]")
+  
+  status       ProductStatus @default(AVAILABLE)
+  views        Int           @default(0)
+  interested   Int           @default(0) // Gatilho de urgência em tempo real
+  
+  // SEO
+  metaTitle    String?
+  metaDesc     String?
+  
+  // Stripe
+  stripeProductId String?
+  stripePriceId   String?
+  
+  featured     Boolean       @default(false)
+  soldAt       DateTime?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  store    Store      @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  order    Order?
+  wishlist Wishlist[]
+  tags     ProductTag[]
+
+  @@index([storeId])
+  @@index([status])
+  @@index([category])
+  @@index([slug])
+  @@map("products")
+}
+
+model ProductTag {
+  id        String  @id @default(cuid())
+  productId String
+  tag       String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId])
+  @@map("product_tags")
+}
+
+// ─────────────────────────────────────────────
+// ORDER – Pedido (Stripe + Produto + Cliente)
+// ─────────────────────────────────────────────
+enum OrderStatus {
+  PENDING
+  PROCESSING
+  PAID
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
+
+enum PaymentMethod {
+  CARD
+  PIX
+  BOLETO
+}
+
+model Order {
+  id              String        @id @default(cuid())
+  storeId         String
+  userId          String?
+  productId       String        @unique // Uma peça única → um pedido
+  
+  // Cliente (pode ser guest)
+  customerName    String
+  customerEmail   String
+  customerPhone   String?
+  customerCpf     String?
+  
+  // Entrega
+  shippingAddress Json?         // { logradouro, numero, bairro, cidade, uf, cep }
+  shippingMethod  String?
+  shippingPrice   Decimal?      @db.Decimal(10, 2)
+  trackingCode    String?
+  
+  // Financeiro
+  totalPrice      Decimal       @db.Decimal(10, 2)
+  paymentMethod   PaymentMethod @default(CARD)
+  status          OrderStatus   @default(PENDING)
+  
+  // Stripe
+  stripeSessionId   String?     @unique
+  stripePaymentIntent String?   @unique
+  stripePdfUrl      String?
+  paidAt            DateTime?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  store   Store   @relation(fields: [storeId], references: [id])
+  user    User?   @relation(fields: [userId], references: [id])
+  product Product @relation(fields: [productId], references: [id])
+
+  @@index([storeId])
+  @@index([status])
+  @@index([stripeSessionId])
+  @@map("orders")
+}
+
+// ─────────────────────────────────────────────
+// WISHLIST – Favoritos com Price Drop alert
+// ─────────────────────────────────────────────
+model Wishlist {
+  id        String   @id @default(cuid())
+  userId    String
+  productId String
+  priceWhenAdded Decimal @db.Decimal(10, 2) // Para detectar price drop
+  notified  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, productId])
+  @@map("wishlists")
+}
+
+// ─────────────────────────────────────────────
+// ACCESS LOG – Logs de acesso admin
+// ─────────────────────────────────────────────
+model AccessLog {
+  id        String   @id @default(cuid())
+  userId    String
+  action    String
+  ip        String?
+  userAgent String?  @db.Text
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("access_logs")
+}
